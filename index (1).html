@@ -1,0 +1,1005 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TLB 환경팀 검침 시스템</title>
+<link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getFirestore, collection, addDoc, getDocs, deleteDoc, doc, query, orderBy, where } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAaen1z4d0GYiOtauUpD84lQr1Y1Z31WD4",
+    authDomain: "tlb-enviror.firebaseapp.com",
+    projectId: "tlb-enviror",
+    storageBucket: "tlb-enviror.firebasestorage.app",
+    messagingSenderId: "615952321239",
+    appId: "1:615952321239:web:98a2e69d4b4a31c1b23e92",
+    measurementId: "G-TSM7Q9934Z"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+
+  // ── 전역 상태 ──────────────────────────────────────────────
+  const TEAM_ID = "tlb";
+  const TEAM_PW = "tlb2024!"; // 필요시 변경
+  let currentFactory = "1공장";
+  let currentTab = "h2o2";
+  let chartInstance = null;
+
+  // ── 로그인 ──────────────────────────────────────────────────
+  function checkLogin() {
+    return sessionStorage.getItem("tlb_login") === "true";
+  }
+
+  function login() {
+    const id = document.getElementById("login-id").value.trim();
+    const pw = document.getElementById("login-pw").value.trim();
+    if (id === TEAM_ID && pw === TEAM_PW) {
+      sessionStorage.setItem("tlb_login", "true");
+      showApp();
+    } else {
+      document.getElementById("login-error").style.display = "block";
+    }
+  }
+
+  function logout() {
+    sessionStorage.removeItem("tlb_login");
+    location.reload();
+  }
+
+  function showApp() {
+    document.getElementById("login-screen").style.display = "none";
+    document.getElementById("app-screen").style.display = "flex";
+    loadData();
+  }
+
+  // ── 공장 / 탭 전환 ──────────────────────────────────────────
+  window.switchFactory = function(factory) {
+    currentFactory = factory;
+    document.querySelectorAll(".factory-btn").forEach(b => b.classList.remove("active"));
+    document.querySelector(`.factory-btn[data-factory="${factory}"]`).classList.add("active");
+    loadData();
+  };
+
+  window.switchTab = function(tab) {
+    currentTab = tab;
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelector(`.tab-btn[data-tab="${tab}"]`).classList.add("active");
+
+    // 탭별 패널 표시
+    document.querySelectorAll(".tab-panel").forEach(p => p.style.display = "none");
+    document.getElementById(`panel-${tab}`).style.display = "block";
+
+    // 전기탭은 2공장만
+    const elecBtn = document.querySelector('.tab-btn[data-tab="elec"]');
+    if (tab === "elec" && currentFactory !== "2공장") {
+      currentFactory = "2공장";
+      document.querySelectorAll(".factory-btn").forEach(b => b.classList.remove("active"));
+      document.querySelector('.factory-btn[data-factory="2공장"]').classList.add("active");
+    }
+
+    loadData();
+  };
+
+  // ── 데이터 로드 ──────────────────────────────────────────────
+  async function loadData() {
+    if (currentTab === "h2o2") await loadH2O2();
+    else if (currentTab === "elec") await loadElec();
+    else if (currentTab === "chem") await loadChem();
+    else if (currentTab === "stats") await loadStats();
+  }
+
+  // ── H2O2 검침 ───────────────────────────────────────────────
+  async function loadH2O2() {
+    const tbody = document.getElementById("h2o2-tbody");
+    tbody.innerHTML = `<tr><td colspan="5" class="loading-cell">불러오는 중...</td></tr>`;
+    const q = query(collection(db, "h2o2"), where("factory", "==", currentFactory), orderBy("date", "desc"));
+    const snap = await getDocs(q);
+    const rows = [];
+    snap.forEach(d => rows.push({ id: d.id, ...d.data() }));
+    updateH2O2Table(rows);
+  }
+
+  function updateH2O2Table(rows) {
+    const tbody = document.getElementById("h2o2-tbody");
+    if (rows.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty-cell">데이터가 없습니다</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = rows.map((r, i) => {
+      const prev = rows[i + 1];
+      const usage = prev ? (parseFloat(r.value) - parseFloat(prev.value)).toFixed(1) : "-";
+      return `
+        <tr>
+          <td>${r.date}</td>
+          <td>${parseFloat(r.value).toLocaleString()} L</td>
+          <td>${usage !== "-" ? usage + " L" : "-"}</td>
+          <td>${r.memo || "-"}</td>
+          <td><button class="del-btn" onclick="deleteRecord('h2o2','${r.id}')">삭제</button></td>
+        </tr>`;
+    }).join("");
+  }
+
+  window.addH2O2 = async function() {
+    const date = document.getElementById("h2o2-date").value;
+    const value = document.getElementById("h2o2-value").value;
+    const memo = document.getElementById("h2o2-memo").value;
+    if (!date || !value) { alert("날짜와 검침값을 입력해주세요."); return; }
+    await addDoc(collection(db, "h2o2"), { factory: currentFactory, date, value: parseFloat(value), memo, createdAt: new Date().toISOString() });
+    document.getElementById("h2o2-date").value = "";
+    document.getElementById("h2o2-value").value = "";
+    document.getElementById("h2o2-memo").value = "";
+    loadH2O2();
+  };
+
+  // ── 전기 검침 (2공장 스크러버) ──────────────────────────────
+  async function loadElec() {
+    const tbody = document.getElementById("elec-tbody");
+    tbody.innerHTML = `<tr><td colspan="5" class="loading-cell">불러오는 중...</td></tr>`;
+    const q = query(collection(db, "elec"), orderBy("date", "desc"));
+    const snap = await getDocs(q);
+    const rows = [];
+    snap.forEach(d => rows.push({ id: d.id, ...d.data() }));
+    updateElecTable(rows);
+  }
+
+  function updateElecTable(rows) {
+    const tbody = document.getElementById("elec-tbody");
+    if (rows.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty-cell">데이터가 없습니다</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = rows.map((r, i) => {
+      const prev = rows[i + 1];
+      const usage = prev ? (parseFloat(r.value) - parseFloat(prev.value)).toFixed(1) : "-";
+      return `
+        <tr>
+          <td>${r.date}</td>
+          <td>${parseFloat(r.value).toLocaleString()} kWh</td>
+          <td>${usage !== "-" ? usage + " kWh" : "-"}</td>
+          <td>${r.memo || "-"}</td>
+          <td><button class="del-btn" onclick="deleteRecord('elec','${r.id}')">삭제</button></td>
+        </tr>`;
+    }).join("");
+  }
+
+  window.addElec = async function() {
+    const date = document.getElementById("elec-date").value;
+    const value = document.getElementById("elec-value").value;
+    const memo = document.getElementById("elec-memo").value;
+    if (!date || !value) { alert("날짜와 검침값을 입력해주세요."); return; }
+    await addDoc(collection(db, "elec"), { date, value: parseFloat(value), memo, createdAt: new Date().toISOString() });
+    document.getElementById("elec-date").value = "";
+    document.getElementById("elec-value").value = "";
+    document.getElementById("elec-memo").value = "";
+    loadElec();
+  };
+
+  // ── 화학물질 관리대장 ────────────────────────────────────────
+  async function loadChem() {
+    const tbody = document.getElementById("chem-tbody");
+    tbody.innerHTML = `<tr><td colspan="7" class="loading-cell">불러오는 중...</td></tr>`;
+    const q = query(collection(db, "chem"), where("factory", "==", currentFactory), orderBy("date", "desc"));
+    const snap = await getDocs(q);
+    const rows = [];
+    snap.forEach(d => rows.push({ id: d.id, ...d.data() }));
+    updateChemTable(rows);
+  }
+
+  function updateChemTable(rows) {
+    const tbody = document.getElementById("chem-tbody");
+    if (rows.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" class="empty-cell">데이터가 없습니다</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = rows.map(r => `
+      <tr>
+        <td>${r.date}</td>
+        <td>${r.name}</td>
+        <td>${r.casno || "-"}</td>
+        <td>${r.amount} ${r.unit}</td>
+        <td>${r.type}</td>
+        <td>${r.memo || "-"}</td>
+        <td><button class="del-btn" onclick="deleteRecord('chem','${r.id}')">삭제</button></td>
+      </tr>`).join("");
+  }
+
+  window.addChem = async function() {
+    const date = document.getElementById("chem-date").value;
+    const name = document.getElementById("chem-name").value;
+    const casno = document.getElementById("chem-casno").value;
+    const amount = document.getElementById("chem-amount").value;
+    const unit = document.getElementById("chem-unit").value;
+    const type = document.getElementById("chem-type").value;
+    const memo = document.getElementById("chem-memo").value;
+    if (!date || !name || !amount) { alert("날짜, 물질명, 수량을 입력해주세요."); return; }
+    await addDoc(collection(db, "chem"), { factory: currentFactory, date, name, casno, amount: parseFloat(amount), unit, type, memo, createdAt: new Date().toISOString() });
+    ["chem-date","chem-name","chem-casno","chem-amount","chem-memo"].forEach(id => document.getElementById(id).value = "");
+    loadChem();
+  };
+
+  // ── 통계 ────────────────────────────────────────────────────
+  async function loadStats() {
+    // H2O2 통계
+    const qH = query(collection(db, "h2o2"), where("factory", "==", currentFactory), orderBy("date", "asc"));
+    const snapH = await getDocs(qH);
+    const h2o2Rows = [];
+    snapH.forEach(d => h2o2Rows.push(d.data()));
+
+    const h2o2Labels = [];
+    const h2o2Usage = [];
+    for (let i = 1; i < h2o2Rows.length; i++) {
+      h2o2Labels.push(h2o2Rows[i].date);
+      h2o2Usage.push((parseFloat(h2o2Rows[i].value) - parseFloat(h2o2Rows[i-1].value)).toFixed(1));
+    }
+
+    // 전기 통계 (2공장 전용)
+    const qE = query(collection(db, "elec"), orderBy("date", "asc"));
+    const snapE = await getDocs(qE);
+    const elecRows = [];
+    snapE.forEach(d => elecRows.push(d.data()));
+
+    const elecLabels = [];
+    const elecUsage = [];
+    for (let i = 1; i < elecRows.length; i++) {
+      elecLabels.push(elecRows[i].date);
+      elecUsage.push((parseFloat(elecRows[i].value) - parseFloat(elecRows[i-1].value)).toFixed(1));
+    }
+
+    renderStatsCards(h2o2Rows, elecRows);
+    renderChart("chart-h2o2", h2o2Labels, h2o2Usage, "H2O2 사용량 (L)", "#3b82f6");
+    renderChart("chart-elec", elecLabels, elecUsage, "전기 사용량 kWh (2공장 스크러버)", "#f59e0b");
+  }
+
+  function renderStatsCards(h2o2Rows, elecRows) {
+    // H2O2 최근 사용량
+    let h2o2Recent = "-";
+    if (h2o2Rows.length >= 2) {
+      h2o2Recent = (parseFloat(h2o2Rows[h2o2Rows.length-1].value) - parseFloat(h2o2Rows[h2o2Rows.length-2].value)).toFixed(1) + " L";
+    }
+    document.getElementById("stat-h2o2").textContent = h2o2Recent;
+
+    // 전기 최근 사용량
+    let elecRecent = "-";
+    if (elecRows.length >= 2) {
+      elecRecent = (parseFloat(elecRows[elecRows.length-1].value) - parseFloat(elecRows[elecRows.length-2].value)).toFixed(1) + " kWh";
+    }
+    document.getElementById("stat-elec").textContent = elecRecent;
+  }
+
+  function renderChart(canvasId, labels, data, label, color) {
+    const ctx = document.getElementById(canvasId).getContext("2d");
+    // 기존 차트 제거
+    if (window[canvasId + "_chart"]) window[canvasId + "_chart"].destroy();
+    window[canvasId + "_chart"] = new Chart(ctx, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [{
+          label,
+          data,
+          backgroundColor: color + "33",
+          borderColor: color,
+          borderWidth: 2,
+          borderRadius: 6,
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: { beginAtZero: false, grid: { color: "#f1f5f9" } },
+          x: { grid: { display: false } }
+        }
+      }
+    });
+  }
+
+  // ── 삭제 ────────────────────────────────────────────────────
+  window.deleteRecord = async function(colName, id) {
+    if (!confirm("정말 삭제하시겠습니까?")) return;
+    await deleteDoc(doc(db, colName, id));
+    loadData();
+  };
+
+  // ── 초기화 ──────────────────────────────────────────────────
+  window.addEventListener("DOMContentLoaded", () => {
+    if (checkLogin()) {
+      showApp();
+    }
+    document.getElementById("login-pw").addEventListener("keydown", e => {
+      if (e.key === "Enter") login();
+    });
+  });
+
+  window.login = login;
+  window.logout = logout;
+</script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Pretendard', -apple-system, sans-serif;
+    background: #f8fafc;
+    color: #1e293b;
+    min-height: 100vh;
+  }
+
+  /* ── 로그인 화면 ── */
+  #login-screen {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%);
+  }
+
+  .login-box {
+    background: white;
+    border-radius: 20px;
+    padding: 48px 40px;
+    width: 360px;
+    box-shadow: 0 25px 60px rgba(0,0,0,0.3);
+  }
+
+  .login-logo {
+    text-align: center;
+    margin-bottom: 32px;
+  }
+
+  .login-logo .badge {
+    display: inline-block;
+    background: #0f172a;
+    color: white;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    padding: 6px 14px;
+    border-radius: 20px;
+    margin-bottom: 16px;
+  }
+
+  .login-logo h1 {
+    font-size: 22px;
+    font-weight: 700;
+    color: #0f172a;
+    line-height: 1.3;
+  }
+
+  .login-logo p {
+    font-size: 13px;
+    color: #94a3b8;
+    margin-top: 6px;
+  }
+
+  .login-field {
+    margin-bottom: 16px;
+  }
+
+  .login-field label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: #64748b;
+    margin-bottom: 6px;
+    letter-spacing: 0.5px;
+  }
+
+  .login-field input {
+    width: 100%;
+    padding: 12px 16px;
+    border: 1.5px solid #e2e8f0;
+    border-radius: 10px;
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .login-field input:focus { border-color: #3b82f6; }
+
+  .login-error {
+    display: none;
+    color: #ef4444;
+    font-size: 12px;
+    margin-bottom: 12px;
+    text-align: center;
+  }
+
+  .login-btn {
+    width: 100%;
+    padding: 14px;
+    background: #0f172a;
+    color: white;
+    border: none;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .login-btn:hover { background: #1e3a5f; }
+
+  /* ── 앱 화면 ── */
+  #app-screen {
+    display: none;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+
+  /* 헤더 */
+  .header {
+    background: #0f172a;
+    color: white;
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 60px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .header-badge {
+    background: #3b82f6;
+    color: white;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    padding: 4px 10px;
+    border-radius: 20px;
+  }
+
+  .header h1 {
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .logout-btn {
+    background: rgba(255,255,255,0.1);
+    color: white;
+    border: none;
+    padding: 7px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .logout-btn:hover { background: rgba(255,255,255,0.2); }
+
+  /* 공장 탭 */
+  .factory-bar {
+    background: white;
+    border-bottom: 1px solid #e2e8f0;
+    padding: 0 24px;
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+
+  .factory-btn {
+    padding: 14px 20px;
+    border: none;
+    background: transparent;
+    font-size: 14px;
+    font-weight: 500;
+    color: #94a3b8;
+    cursor: pointer;
+    border-bottom: 2.5px solid transparent;
+    font-family: inherit;
+    transition: all 0.2s;
+  }
+
+  .factory-btn.active {
+    color: #0f172a;
+    border-bottom-color: #3b82f6;
+    font-weight: 700;
+  }
+
+  /* 콘텐츠 */
+  .content {
+    flex: 1;
+    padding: 24px;
+    max-width: 1100px;
+    width: 100%;
+    margin: 0 auto;
+  }
+
+  /* 기능 탭 */
+  .tab-bar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+  }
+
+  .tab-btn {
+    padding: 9px 18px;
+    border-radius: 20px;
+    border: 1.5px solid #e2e8f0;
+    background: white;
+    color: #64748b;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.2s;
+  }
+
+  .tab-btn.active {
+    background: #0f172a;
+    color: white;
+    border-color: #0f172a;
+  }
+
+  /* 패널 */
+  .tab-panel { display: none; }
+
+  /* 입력 폼 */
+  .input-card {
+    background: white;
+    border-radius: 16px;
+    padding: 24px;
+    margin-bottom: 20px;
+    border: 1px solid #e2e8f0;
+  }
+
+  .input-card h3 {
+    font-size: 14px;
+    font-weight: 700;
+    color: #0f172a;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .input-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: flex-end;
+  }
+
+  .input-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1;
+    min-width: 140px;
+  }
+
+  .input-group label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #64748b;
+    letter-spacing: 0.4px;
+  }
+
+  .input-group input,
+  .input-group select {
+    padding: 10px 14px;
+    border: 1.5px solid #e2e8f0;
+    border-radius: 8px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.2s;
+    background: white;
+  }
+
+  .input-group input:focus,
+  .input-group select:focus { border-color: #3b82f6; }
+
+  .add-btn {
+    padding: 10px 22px;
+    background: #3b82f6;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s;
+    height: 40px;
+  }
+
+  .add-btn:hover { background: #2563eb; }
+
+  /* 테이블 */
+  .table-card {
+    background: white;
+    border-radius: 16px;
+    border: 1px solid #e2e8f0;
+    overflow: hidden;
+  }
+
+  .table-header {
+    padding: 18px 24px;
+    border-bottom: 1px solid #f1f5f9;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .table-header h3 {
+    font-size: 14px;
+    font-weight: 700;
+    color: #0f172a;
+  }
+
+  .table-header .record-count {
+    font-size: 12px;
+    color: #94a3b8;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  thead th {
+    background: #f8fafc;
+    padding: 11px 16px;
+    text-align: left;
+    font-size: 11px;
+    font-weight: 700;
+    color: #64748b;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid #e2e8f0;
+  }
+
+  tbody td {
+    padding: 13px 16px;
+    font-size: 13px;
+    color: #334155;
+    border-bottom: 1px solid #f1f5f9;
+  }
+
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover td { background: #f8fafc; }
+
+  .loading-cell, .empty-cell {
+    text-align: center;
+    color: #94a3b8;
+    font-size: 13px;
+    padding: 32px !important;
+  }
+
+  .del-btn {
+    padding: 4px 12px;
+    background: #fef2f2;
+    color: #ef4444;
+    border: 1px solid #fecaca;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.2s;
+  }
+
+  .del-btn:hover { background: #ef4444; color: white; }
+
+  /* 통계 */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .stat-card {
+    background: white;
+    border-radius: 16px;
+    padding: 24px;
+    border: 1px solid #e2e8f0;
+  }
+
+  .stat-card .stat-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: #94a3b8;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+  }
+
+  .stat-card .stat-value {
+    font-size: 28px;
+    font-weight: 700;
+    color: #0f172a;
+  }
+
+  .stat-card .stat-sub {
+    font-size: 12px;
+    color: #94a3b8;
+    margin-top: 4px;
+  }
+
+  .chart-card {
+    background: white;
+    border-radius: 16px;
+    padding: 24px;
+    border: 1px solid #e2e8f0;
+    margin-bottom: 20px;
+  }
+
+  .chart-card h3 {
+    font-size: 14px;
+    font-weight: 700;
+    color: #0f172a;
+    margin-bottom: 20px;
+  }
+
+  /* 안내 배너 */
+  .notice-banner {
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 12px;
+    color: #1d4ed8;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  @media (max-width: 600px) {
+    .content { padding: 16px; }
+    .input-row { flex-direction: column; }
+    .input-group { min-width: 100%; }
+    .header h1 { font-size: 13px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- 로그인 화면 -->
+<div id="login-screen">
+  <div class="login-box">
+    <div class="login-logo">
+      <div class="badge">TLB</div>
+      <h1>환경팀 검침 시스템</h1>
+      <p>환경안전G 전용 · v1.0.0</p>
+    </div>
+    <div class="login-field">
+      <label>아이디</label>
+      <input type="text" id="login-id" placeholder="팀 아이디 입력">
+    </div>
+    <div class="login-field">
+      <label>비밀번호</label>
+      <input type="password" id="login-pw" placeholder="비밀번호 입력">
+    </div>
+    <div class="login-error" id="login-error">아이디 또는 비밀번호가 올바르지 않습니다.</div>
+    <button class="login-btn" onclick="login()">로그인</button>
+  </div>
+</div>
+
+<!-- 앱 화면 -->
+<div id="app-screen">
+  <!-- 헤더 -->
+  <div class="header">
+    <div class="header-left">
+      <span class="header-badge">TLB</span>
+      <h1>환경팀 검침 시스템</h1>
+    </div>
+    <button class="logout-btn" onclick="logout()">로그아웃</button>
+  </div>
+
+  <!-- 공장 선택 -->
+  <div class="factory-bar">
+    <button class="factory-btn active" data-factory="1공장" onclick="switchFactory('1공장')">🏭 1공장</button>
+    <button class="factory-btn" data-factory="2공장" onclick="switchFactory('2공장')">🏭 2공장</button>
+  </div>
+
+  <!-- 콘텐츠 -->
+  <div class="content">
+
+    <!-- 기능 탭 -->
+    <div class="tab-bar">
+      <button class="tab-btn active" data-tab="h2o2" onclick="switchTab('h2o2')">🧪 H2O2 검침</button>
+      <button class="tab-btn" data-tab="elec" onclick="switchTab('elec')">⚡ 전기 검침</button>
+      <button class="tab-btn" data-tab="chem" onclick="switchTab('chem')">🧴 화학물질 관리대장</button>
+      <button class="tab-btn" data-tab="stats" onclick="switchTab('stats')">📊 통계</button>
+    </div>
+
+    <!-- H2O2 패널 -->
+    <div id="panel-h2o2" class="tab-panel" style="display:block;">
+      <div class="input-card">
+        <h3>➕ 검침 입력</h3>
+        <div class="input-row">
+          <div class="input-group">
+            <label>검침일</label>
+            <input type="date" id="h2o2-date">
+          </div>
+          <div class="input-group">
+            <label>검침값 (L)</label>
+            <input type="number" id="h2o2-value" placeholder="예: 1250.5">
+          </div>
+          <div class="input-group">
+            <label>비고</label>
+            <input type="text" id="h2o2-memo" placeholder="선택입력">
+          </div>
+          <button class="add-btn" onclick="addH2O2()">저장</button>
+        </div>
+      </div>
+      <div class="table-card">
+        <div class="table-header">
+          <h3>H2O2 검침 기록</h3>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>검침일</th>
+              <th>검침값</th>
+              <th>사용량</th>
+              <th>비고</th>
+              <th>삭제</th>
+            </tr>
+          </thead>
+          <tbody id="h2o2-tbody">
+            <tr><td colspan="5" class="loading-cell">데이터를 불러오는 중...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 전기 패널 -->
+    <div id="panel-elec" class="tab-panel">
+      <div class="notice-banner">
+        ⚡ 전기 검침은 <strong>&nbsp;2공장 스크러버&nbsp;</strong> 전용입니다.
+      </div>
+      <div class="input-card">
+        <h3>➕ 검침 입력</h3>
+        <div class="input-row">
+          <div class="input-group">
+            <label>검침일</label>
+            <input type="date" id="elec-date">
+          </div>
+          <div class="input-group">
+            <label>검침값 (kWh)</label>
+            <input type="number" id="elec-value" placeholder="예: 48250">
+          </div>
+          <div class="input-group">
+            <label>비고</label>
+            <input type="text" id="elec-memo" placeholder="선택입력">
+          </div>
+          <button class="add-btn" onclick="addElec()">저장</button>
+        </div>
+      </div>
+      <div class="table-card">
+        <div class="table-header">
+          <h3>전기 검침 기록 · 2공장 스크러버</h3>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>검침일</th>
+              <th>검침값</th>
+              <th>사용량</th>
+              <th>비고</th>
+              <th>삭제</th>
+            </tr>
+          </thead>
+          <tbody id="elec-tbody">
+            <tr><td colspan="5" class="loading-cell">데이터를 불러오는 중...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 화학물질 패널 -->
+    <div id="panel-chem" class="tab-panel">
+      <div class="input-card">
+        <h3>➕ 화학물질 입력</h3>
+        <div class="input-row">
+          <div class="input-group">
+            <label>날짜</label>
+            <input type="date" id="chem-date">
+          </div>
+          <div class="input-group">
+            <label>물질명</label>
+            <input type="text" id="chem-name" placeholder="예: 과산화수소">
+          </div>
+          <div class="input-group">
+            <label>CAS No.</label>
+            <input type="text" id="chem-casno" placeholder="예: 7722-84-1">
+          </div>
+          <div class="input-group" style="min-width:80px; flex:0 0 80px;">
+            <label>수량</label>
+            <input type="number" id="chem-amount" placeholder="0">
+          </div>
+          <div class="input-group" style="min-width:80px; flex:0 0 80px;">
+            <label>단위</label>
+            <select id="chem-unit">
+              <option>L</option>
+              <option>kg</option>
+              <option>통</option>
+              <option>개</option>
+            </select>
+          </div>
+          <div class="input-group" style="min-width:100px; flex:0 0 100px;">
+            <label>입/출고</label>
+            <select id="chem-type">
+              <option>입고</option>
+              <option>출고</option>
+              <option>사용</option>
+            </select>
+          </div>
+          <div class="input-group">
+            <label>비고</label>
+            <input type="text" id="chem-memo" placeholder="선택입력">
+          </div>
+          <button class="add-btn" onclick="addChem()">저장</button>
+        </div>
+      </div>
+      <div class="table-card">
+        <div class="table-header">
+          <h3>화학물질 관리대장</h3>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>날짜</th>
+              <th>물질명</th>
+              <th>CAS No.</th>
+              <th>수량</th>
+              <th>구분</th>
+              <th>비고</th>
+              <th>삭제</th>
+            </tr>
+          </thead>
+          <tbody id="chem-tbody">
+            <tr><td colspan="7" class="loading-cell">데이터를 불러오는 중...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 통계 패널 -->
+    <div id="panel-stats" class="tab-panel">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">H2O2 최근 사용량</div>
+          <div class="stat-value" id="stat-h2o2">-</div>
+          <div class="stat-sub">직전 검침 대비</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">전기 최근 사용량 (2공장 스크러버)</div>
+          <div class="stat-value" id="stat-elec">-</div>
+          <div class="stat-sub">직전 검침 대비</div>
+        </div>
+      </div>
+      <div class="chart-card">
+        <h3>🧪 H2O2 사용량 추이</h3>
+        <canvas id="chart-h2o2" height="100"></canvas>
+      </div>
+      <div class="chart-card">
+        <h3>⚡ 전기 사용량 추이 (2공장 스크러버)</h3>
+        <canvas id="chart-elec" height="100"></canvas>
+      </div>
+    </div>
+
+  </div><!-- /content -->
+</div><!-- /app-screen -->
+
+</body>
+</html>
