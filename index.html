@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TLB 환경팀 검침 시스템</title>
+<link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+const SUPABASE_URL = "https://rcjrwyciqypcdwvskoph.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJjanJ3eWNpcXlwY2R3dnNrb3BoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg5NzA4NDEsImV4cCI6MjA5NDU0Njg0MX0.nhMD0aRTG-UbRkQ9olqjhymCRyQONBiN00b9rkAGfOM";
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+let currentFactory = "2공장", currentTab = "stats", currentChem = "소석회", currentMonth = "전체";
+
+const INIT_STOCK = { '소석회':3990, '염화철':3740, '황산':5190, '고분자응집제':50, '유화소다':0 };
+
+// ── 유틸 ────────────────────────────────────────────────────
+function applyMonthFilter(rows) {
+  if (currentMonth === "전체") return rows;
+  const m = String(currentMonth).padStart(2,'0');
+  return rows.filter(r => r.date && r.date.slice(5,7) === m);
+}
+
+function setLoading(id, cols) { document.getElementById(id).innerHTML = `<tr><td colspan="${cols}" class="loading-cell">불러오는 중...</td></tr>`; }
+function setEmpty(id, cols) { document.getElementById(id).innerHTML = `<tr><td colspan="${cols}" class="empty-cell">데이터가 없습니다</td></tr>`; }
+
+// ── 탭/공장/월 전환 ─────────────────────────────────────────
+function updateFactoryUI() {
+  document.querySelectorAll(".factory-btn").forEach(b => b.classList.remove("active"));
+  document.querySelector(`.factory-btn[data-factory="${currentFactory}"]`).classList.add("active");
+  document.querySelectorAll(".only-2factory").forEach(el => el.style.display = currentFactory === "2공장" ? "" : "none");
+  document.querySelectorAll(".only-1factory").forEach(el => el.style.display = currentFactory === "1공장" ? "" : "none");
+}
+
+window.switchFactory = function(factory) {
+  currentFactory = factory;
+  updateFactoryUI();
+  if (factory === "1공장" && ["sc145","waste","pure","toc","chemical"].includes(currentTab)) switchTabInternal("stats");
+  else loadData();
+};
+
+window.switchTab = function(tab) { switchTabInternal(tab); };
+function switchTabInternal(tab) {
+  currentTab = tab;
+  document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+  const btn = document.querySelector(`.tab-btn[data-tab="${tab}"]`);
+  if (btn) btn.classList.add("active");
+  document.querySelectorAll(".tab-panel").forEach(p => p.style.display = "none");
+  document.getElementById(`panel-${tab}`).style.display = "block";
+  loadData();
+}
+
+window.switchChem = function(chem) {
+  currentChem = chem;
+  document.querySelectorAll(".chem-sub-btn").forEach(b => b.classList.remove("active"));
+  document.querySelector(`.chem-sub-btn[data-chem="${chem}"]`).classList.add("active");
+  document.getElementById("chemical-input-title").textContent = `➕ ${chem} 입력`;
+  document.getElementById("chemical-table-title").textContent = `${chem} 사용 내역`;
+  loadChemical();
+};
+
+window.switchMonth = function(month) {
+  currentMonth = month;
+  document.querySelectorAll(".month-btn").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(`.month-btn[data-month="${month}"]`).forEach(b => b.classList.add("active"));
+  loadData();
+};
+
+async function loadData() {
+  const loaders = { h2o2:loadH2O2, chem:loadChem, sc145:loadSC145, waste:loadWaste, pure:loadPure, toc:loadTOC, chemical:loadChemical, stats:loadStats };
+  if (loaders[currentTab]) await loaders[currentTab]();
+}
+
+// ── SC145 ────────────────────────────────────────────────────
+async function loadSC145() {
+  setLoading("sc145-tbody", 7);
+  const { data } = await sb.from("sc145").select("*").order("date", { ascending: false });
+  const rows = applyMonthFilter(data || []);
+  if (!rows.length) { setEmpty("sc145-tbody", 7); return; }
+  const allData = data || [];
+  document.getElementById("sc145-tbody").innerHTML = rows.map(r => {
+    const idx = allData.findIndex(x => x.id === r.id);
+    const p = allData[idx + 1];
+    const eu = p ? (r.elec - p.elec).toFixed(1) : "-";
+    const wu = p ? (r.water - p.water).toFixed(1) : "-";
+    return `<tr><td>${r.date}</td><td>${r.elec?.toFixed(1)}</td><td>${eu}</td><td>${r.ph ?? "-"}</td><td>${r.water?.toFixed(1)}</td><td>${wu}</td><td><button class="del-btn" onclick="deleteRecord('sc145','${r.id}')">삭제</button></td></tr>`;
+  }).join("");
+}
+window.addSC145 = async function() {
+  const date = document.getElementById("sc145-date").value;
+  const elec = document.getElementById("sc145-elec").value;
+  const ph = document.getElementById("sc145-ph").value;
+  const water = document.getElementById("sc145-water").value;
+  if (!date || !elec || !water) { alert("날짜, 전력, 수도 검침값을 입력해주세요."); return; }
+  await sb.from("sc145").insert({ date, elec: parseFloat(elec), ph: ph ? parseFloat(ph) : null, water: parseFloat(water) });
+  ["sc145-date","sc145-elec","sc145-ph","sc145-water"].forEach(id => document.getElementById(id).value = "");
+  loadSC145();
+};
+
+// ── 폐수처리장 ───────────────────────────────────────────────
+async function loadWaste() {
+  setLoading("waste-tbody", 7);
+  const { data } = await sb.from("waste").select("*").order("date", { ascending: false });
+  const rows = applyMonthFilter(data || []);
+  if (!rows.length) { setEmpty("waste-tbody", 7); return; }
+  const allData = data || [];
+  document.getElementById("waste-tbody").innerHTML = rows.map(r => {
+    const idx = allData.findIndex(x => x.id === r.id);
+    const p = allData[idx + 1];
+    const u = k => p && r[k] != null && p[k] != null ? (r[k] - p[k]).toFixed(1) : "-";
+    return `<tr><td>${r.date}</td><td>${r.water1?.toLocaleString()??"-"}<br><span class="usage-tag">${u("water1")!=="-"?"▲"+u("water1"):"-"}</span></td><td>${r.water2?.toLocaleString()??"-"}<br><span class="usage-tag">${u("water2")!=="-"?"▲"+u("water2"):"-"}</span></td><td>${r.discharge?.toLocaleString()??"-"}<br><span class="usage-tag">${u("discharge")!=="-"?"▲"+u("discharge"):"-"}</span></td><td>${r.wtp?.toLocaleString()??"-"}</td><td>${r.memo||"-"}</td><td><button class="del-btn" onclick="deleteRecord('waste','${r.id}')">삭제</button></td></tr>`;
+  }).join("");
+}
+window.addWaste = async function() {
+  const date=document.getElementById("waste-date").value, water1=document.getElementById("waste-water1").value, water2=document.getElementById("waste-water2").value, discharge=document.getElementById("waste-discharge").value, wtp=document.getElementById("waste-wtp").value, memo=document.getElementById("waste-memo").value;
+  if (!date||!water1||!water2||!discharge) { alert("날짜와 필수 검침값을 입력해주세요."); return; }
+  await sb.from("waste").insert({ date, water1:parseFloat(water1), water2:parseFloat(water2), discharge:parseFloat(discharge), wtp:wtp?parseFloat(wtp):null, memo });
+  ["waste-date","waste-water1","waste-water2","waste-discharge","waste-wtp","waste-memo"].forEach(id=>document.getElementById(id).value="");
+  loadWaste();
+};
+
+// ── 순수실 ──────────────────────────────────────────────────
+async function loadPure() {
+  setLoading("pure-tbody", 4);
+  const { data } = await sb.from("pure").select("*").order("date", { ascending: false });
+  const rows = applyMonthFilter(data || []);
+  if (!rows.length) { setEmpty("pure-tbody", 4); return; }
+  const allData = data || [];
+  document.getElementById("pure-tbody").innerHTML = rows.map(r => {
+    const idx = allData.findIndex(x => x.id === r.id);
+    const p = allData[idx + 1];
+    const u = p ? (r.value - p.value).toFixed(1) : "-";
+    return `<tr><td>${r.date}</td><td>${r.value?.toLocaleString()}</td><td>${u}</td><td><button class="del-btn" onclick="deleteRecord('pure','${r.id}')">삭제</button></td></tr>`;
+  }).join("");
+}
+window.addPure = async function() {
+  const date=document.getElementById("pure-date").value, value=document.getElementById("pure-value").value;
+  if (!date||!value) { alert("날짜와 검침값을 입력해주세요."); return; }
+  await sb.from("pure").insert({ date, value:parseFloat(value) });
+  ["pure-date","pure-value"].forEach(id=>document.getElementById(id).value="");
+  loadPure();
+};
+
+// ── TOC ─────────────────────────────────────────────────────
+async function loadTOC() {
+  setLoading("toc-tbody", 5);
+  const { data } = await sb.from("toc").select("*").order("date", { ascending: false });
+  const rows = applyMonthFilter(data || []);
+  if (!rows.length) { setEmpty("toc-tbody", 5); return; }
+  document.getElementById("toc-tbody").innerHTML = rows.map(r =>
+    `<tr><td>${r.date}</td><td>${r.raw??"-"}</td><td>${r.treated??"-"}</td><td>${r.memo||"-"}</td><td><button class="del-btn" onclick="deleteRecord('toc','${r.id}')">삭제</button></td></tr>`
+  ).join("");
+}
+window.addTOC = async function() {
+  const date=document.getElementById("toc-date").value, raw=document.getElementById("toc-raw").value, treated=document.getElementById("toc-treated").value, memo=document.getElementById("toc-memo").value;
+  if (!date) { alert("날짜를 입력해주세요."); return; }
+  await sb.from("toc").insert({ date, raw:raw?parseFloat(raw):null, treated:treated?parseFloat(treated):null, memo });
+  ["toc-date","toc-raw","toc-treated","toc-memo"].forEach(id=>document.getElementById(id).value="");
+  loadTOC();
+};
+
+// ── H2O2 ────────────────────────────────────────────────────
+async function loadH2O2() {
+  setLoading("h2o2-tbody", 6);
+  const { data } = await sb.from("h2o2").select("*").eq("factory", currentFactory).order("date", { ascending: false });
+  const rows = applyMonthFilter(data || []);
+  if (!rows.length) { setEmpty("h2o2-tbody", 6); return; }
+  const allData = data || [];
+  document.getElementById("h2o2-tbody").innerHTML = rows.map(r => {
+    const idx = allData.findIndex(x => x.id === r.id);
+    const p = allData[idx + 1];
+    const bu = p && r.bo != null && p.bo != null ? (r.bo - p.bo).toFixed(2) : "-";
+    const ou = p && r.ox != null && p.ox != null ? (r.ox - p.ox).toFixed(2) : "-";
+    return `<tr><td>${r.date}</td><td>${r.bo??"-"}</td><td style="color:${bu!=="-"?"#3b82f6":"#334155"};font-weight:${bu!=="-"?"600":"400"}">${bu}</td><td>${r.ox??"-"}</td><td style="color:${ou!=="-"?"#3b82f6":"#334155"};font-weight:${ou!=="-"?"600":"400"}">${ou}</td><td><button class="del-btn" onclick="deleteRecord('h2o2','${r.id}')">삭제</button></td></tr>`;
+  }).join("");
+}
+window.addH2O2 = async function() {
+  const date=document.getElementById("h2o2-date").value, bo=document.getElementById("h2o2-bo").value, ox=document.getElementById("h2o2-ox").value;
+  if (!date) { alert("날짜를 입력해주세요."); return; }
+  await sb.from("h2o2").insert({ factory:currentFactory, date, bo:bo?parseFloat(bo):null, ox:ox?parseFloat(ox):null });
+  ["h2o2-date","h2o2-bo","h2o2-ox"].forEach(id=>document.getElementById(id).value="");
+  loadH2O2();
+};
+
+// ── 약품사용대장 ─────────────────────────────────────────────
+async function loadChemical() {
+  setLoading("chemical-tbody", 5);
+  const inKey = currentChem + "_입고", useKey = currentChem + "_사용";
+  const { data } = await sb.from("chemical").select("*").order("date", { ascending: true });
+  const rows = applyMonthFilter(data || []);
+  const filtered = rows.filter(r => r[inKey] != null || r[useKey] != null);
+  if (!filtered.length) { setEmpty("chemical-tbody", 5); return; }
+  let stock = INIT_STOCK[currentChem] ?? 0;
+  const withStock = filtered.map(r => {
+    stock = stock + (r[inKey] ?? 0) - (r[useKey] ?? 0);
+    return { ...r, inAmt: r[inKey], useAmt: r[useKey], stock };
+  });
+  withStock.reverse();
+  document.getElementById("chemical-tbody").innerHTML = withStock.map(r =>
+    `<tr><td>${r.date}</td><td>${r.inAmt!=null?r.inAmt.toLocaleString()+' Kg':'-'}</td><td>${r.useAmt!=null?r.useAmt.toLocaleString()+' Kg':'-'}</td><td><strong>${r.stock.toLocaleString()} Kg</strong></td><td><button class="del-btn" onclick="deleteRecord('chemical','${r.id}')">삭제</button></td></tr>`
+  ).join("");
+}
+window.addChemicalSingle = async function() {
+  const date=document.getElementById("chemical-date").value, inVal=document.getElementById("chemical-in").value, useVal=document.getElementById("chemical-use").value;
+  if (!date) { alert("날짜를 입력해주세요."); return; }
+  if (!inVal && !useVal) { alert("입고량 또는 사용량을 입력해주세요."); return; }
+  const inKey = currentChem + "_입고", useKey = currentChem + "_사용";
+  const { data: existing } = await sb.from("chemical").select("*").eq("date", date);
+  if (existing && existing.length > 0) {
+    await sb.from("chemical").update({ [inKey]: inVal ? parseFloat(inVal) : null, [useKey]: useVal ? parseFloat(useVal) : null }).eq("id", existing[0].id);
+  } else {
+    await sb.from("chemical").insert({ date, [inKey]: inVal ? parseFloat(inVal) : null, [useKey]: useVal ? parseFloat(useVal) : null });
+  }
+  ["chemical-date","chemical-in","chemical-use"].forEach(id=>document.getElementById(id).value="");
+  loadChemical();
+};
+
+// ── 화학물질 관리대장 ────────────────────────────────────────
+async function loadChem() {
+  setLoading("chem-tbody", 7);
+  const { data } = await sb.from("chem").select("*").eq("factory", currentFactory).order("date", { ascending: false });
+  const rows = applyMonthFilter(data || []);
+  if (!rows.length) { setEmpty("chem-tbody", 7); return; }
+  document.getElementById("chem-tbody").innerHTML = rows.map(r =>
+    `<tr><td>${r.date}</td><td>${r.name}</td><td>${r.casno||"-"}</td><td>${r.amount} ${r.unit}</td><td>${r.type}</td><td>${r.memo||"-"}</td><td><button class="del-btn" onclick="deleteRecord('chem','${r.id}')">삭제</button></td></tr>`
+  ).join("");
+}
+window.addChem = async function() {
+  const date=document.getElementById("chem-date").value, name=document.getElementById("chem-name").value, casno=document.getElementById("chem-casno").value, amount=document.getElementById("chem-amount").value, unit=document.getElementById("chem-unit").value, type=document.getElementById("chem-type").value, memo=document.getElementById("chem-memo").value;
+  if (!date||!name||!amount) { alert("날짜, 물질명, 수량을 입력해주세요."); return; }
+  await sb.from("chem").insert({ factory:currentFactory, date, name, casno, amount:parseFloat(amount), unit, type, memo });
+  ["chem-date","chem-name","chem-casno","chem-amount","chem-memo"].forEach(id=>document.getElementById(id).value="");
+  loadChem();
+};
+
+// ── 삭제 ────────────────────────────────────────────────────
+window.deleteRecord = async function(table, id) {
+  if (!confirm("정말 삭제하시겠습니까?")) return;
+  await sb.from(table).delete().eq("id", id);
+  loadData();
+};
+
+// ── 통계 ────────────────────────────────────────────────────
+async function loadStats() {
+  const is2f = currentFactory === "2공장";
+  const [hRes, scRes, tocRes, chemRes] = await Promise.all([
+    sb.from("h2o2").select("*").eq("factory", currentFactory).order("date", { ascending: true }),
+    is2f ? sb.from("sc145").select("*").order("date", { ascending: true }) : Promise.resolve({ data: [] }),
+    is2f ? sb.from("toc").select("*").order("date", { ascending: true }) : Promise.resolve({ data: [] }),
+    is2f ? sb.from("chemical").select("*").order("date", { ascending: true }) : Promise.resolve({ data: [] }),
+  ]);
+
+  const hRows = hRes.data || [];
+  const hF = applyMonthFilter(hRows);
+  const lH = hRows[hRows.length-1], pH = hRows[hRows.length-2];
+
+  if (is2f) {
+    const boU = lH&&pH&&lH.bo!=null&&pH.bo!=null ? (lH.bo-pH.bo).toFixed(2)+" m³" : "-";
+    const oxU = lH&&pH&&lH.ox!=null&&pH.ox!=null ? (lH.ox-pH.ox).toFixed(2)+" m³" : "-";
+    document.getElementById("stat-h2o2-2f").textContent = `BO제거기: ${boU} / 옥사이드: ${oxU}`;
+
+    const sc = scRes.data || [], scF = applyMonthFilter(sc);
+    const lSC=scF[scF.length-1], pSC=scF[scF.length-2];
+    document.getElementById("stat-elec2").textContent = (lSC&&pSC) ? (lSC.elec-pSC.elec).toFixed(1)+" kWh" : "-";
+    document.getElementById("stat-water2").textContent = (lSC&&pSC) ? (lSC.water-pSC.water).toFixed(1)+" 톤" : "-";
+
+    const el=[],ew=[],wl=[],wd=[];
+    for(let i=1;i<scF.length;i++){el.push(scF[i].date.slice(5));ew.push((scF[i].elec-scF[i-1].elec).toFixed(1));wl.push(scF[i].date.slice(5));wd.push((scF[i].water-scF[i-1].water).toFixed(1));}
+    renderBar("chart-elec",el,ew,"전력 사용량","#f59e0b",10,20);
+    renderBar("chart-water",wl,wd,"수도 사용량","#3b82f6",0,8);
+
+    const toc = tocRes.data || [], tocF = applyMonthFilter(toc);
+    renderTOCChart(tocF);
+
+    const chem = chemRes.data || [], chemF = applyMonthFilter(chem).filter(r=>r["소석회_사용"]!=null||r["소석회_입고"]!=null);
+    let stock=INIT_STOCK["소석회"]??0; const chemLabels=[],chemStock=[],chemUse=[];
+    chemF.forEach(r=>{ stock+=(r["소석회_입고"]??0)-(r["소석회_사용"]??0); chemLabels.push(r.date.slice(5)); chemStock.push(stock); chemUse.push(r["소석회_사용"]??null); });
+    renderLine2("chart-chemical",chemLabels,chemUse,chemStock,"소석회 사용량","소석회 재고량","#f97316","#94a3b8");
+
+    const hl=[],hbo=[],hox=[];
+    for(let i=1;i<hF.length;i++){hl.push(hF[i].date.slice(5));hbo.push(hF[i].bo!=null&&hF[i-1].bo!=null?(hF[i].bo-hF[i-1].bo).toFixed(2):null);hox.push(hF[i].ox!=null&&hF[i-1].ox!=null?(hF[i].ox-hF[i-1].ox).toFixed(2):null);}
+    renderLine2("chart-h2o2-2f",hl,hbo,hox,"BO제거기","옥사이드","#8b5cf6","#ec4899");
+  } else {
+    const boU = lH&&pH&&lH.bo!=null&&pH.bo!=null ? (lH.bo-pH.bo).toFixed(2)+" m³" : "-";
+    const oxU = lH&&pH&&lH.ox!=null&&pH.ox!=null ? (lH.ox-pH.ox).toFixed(2)+" m³" : "-";
+    document.getElementById("stat-h2o2-1f").textContent = `BO제거기: ${boU} / 옥사이드: ${oxU}`;
+    const hl=[],hbo=[],hox=[];
+    for(let i=1;i<hF.length;i++){hl.push(hF[i].date.slice(5));hbo.push(hF[i].bo!=null&&hF[i-1].bo!=null?(hF[i].bo-hF[i-1].bo).toFixed(2):null);hox.push(hF[i].ox!=null&&hF[i-1].ox!=null?(hF[i].ox-hF[i-1].ox).toFixed(2):null);}
+    renderLine2("chart-h2o2-1f",hl,hbo,hox,"BO제거기","옥사이드","#8b5cf6","#ec4899");
+  }
+}
+
+function renderTOCChart(tocF) {
+  const ctx = document.getElementById("chart-toc")?.getContext("2d"); if(!ctx)return;
+  if(window["chart-toc_c"]) window["chart-toc_c"].destroy();
+  window["chart-toc_c"] = new Chart(ctx, {
+    type:"line",
+    data:{ labels:tocF.map(r=>r.date.slice(5)), datasets:[
+      {label:"원수",data:tocF.map(r=>r.raw),borderColor:"#ef4444",backgroundColor:"#ef444420",tension:0.3,fill:false,pointRadius:2},
+      {label:"처리수",data:tocF.map(r=>r.treated),borderColor:"#22c55e",backgroundColor:"#22c55e20",tension:0.3,fill:false,pointRadius:2},
+      {label:"배출허용기준",data:tocF.map(()=>75.0),borderColor:"#f59e0b",backgroundColor:"transparent",borderWidth:2,borderDash:[6,4],pointRadius:0,tension:0}
+    ]},
+    options:{responsive:true,scales:{y:{grid:{color:"#f1f5f9"}},x:{grid:{display:false},ticks:{maxTicksLimit:15}}},plugins:{legend:{display:true,position:"top"}}}
+  });
+}
+
+function renderBar(id,labels,data,label,color,yMin,yMax){
+  const ctx=document.getElementById(id)?.getContext("2d"); if(!ctx)return;
+  if(window[id+"_c"])window[id+"_c"].destroy();
+  const yOpts={grid:{color:"#f1f5f9"}};
+  if(yMin!==undefined)yOpts.min=yMin; if(yMax!==undefined)yOpts.max=yMax;
+  window[id+"_c"]=new Chart(ctx,{type:"bar",data:{labels,datasets:[{label,data,backgroundColor:color+"33",borderColor:color,borderWidth:2,borderRadius:4}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{y:yOpts,x:{grid:{display:false},ticks:{maxTicksLimit:15}}}}});
+}
+function renderLine2(id,labels,d1,d2,l1,l2,c1,c2){
+  const ctx=document.getElementById(id)?.getContext("2d"); if(!ctx)return;
+  if(window[id+"_c"])window[id+"_c"].destroy();
+  window[id+"_c"]=new Chart(ctx,{type:"line",data:{labels,datasets:[{label:l1,data:d1,borderColor:c1,backgroundColor:c1+"20",tension:0.3,fill:false,pointRadius:2},{label:l2,data:d2,borderColor:c2,backgroundColor:c2+"20",tension:0.3,fill:false,pointRadius:2}]},options:{responsive:true,scales:{y:{grid:{color:"#f1f5f9"}},x:{grid:{display:false},ticks:{maxTicksLimit:15}}},plugins:{legend:{display:true,position:"top"}}}});
+}
+
+// ── 파일 업로드 ──────────────────────────────────────────────
+window.handleFileDrop = function(e) { e.preventDefault(); document.getElementById("drop-zone").classList.remove("drag-over"); const file=e.dataTransfer?.files[0]||e.target.files[0]; if(file)processUploadFile(file); };
+window.handleFileDrag = function(e) { e.preventDefault(); document.getElementById("drop-zone").classList.add("drag-over"); };
+window.handleFileDragLeave = function() { document.getElementById("drop-zone").classList.remove("drag-over"); };
+window.handleFileSelect = function(e) { const file=e.target.files[0]; if(file)processUploadFile(file); };
+
+async function processUploadFile(file) {
+  const statusEl=document.getElementById("upload-status"), logEl=document.getElementById("upload-log");
+  statusEl.textContent="📖 파일 읽는 중..."; logEl.innerHTML="";
+  const reader=new FileReader();
+  reader.onload=async function(e){
+    try {
+      const wb=XLSX.read(e.target.result,{type:"array"});
+      const allNames=wb.SheetNames.join(",");
+      logEl.innerHTML=`<span class="log-info">📋 시트: ${wb.SheetNames.join(", ")}</span><br>`;
+      if(allNames.includes("SC145")||allNames.includes("폐수처리장 운영일지")) await uploadEnvData(wb,logEl,statusEl);
+      else if(wb.SheetNames[0].includes("월")&&wb.SheetNames.length>1) await uploadH2O2File(wb,logEl,statusEl);
+      else if(wb.SheetNames[0].includes("공장_")) await uploadChemicalFile(wb,logEl,statusEl);
+      else { logEl.innerHTML+=`<span class="log-error">⚠️ 파일 형식 인식 실패</span>`; statusEl.textContent="인식 실패"; }
+    } catch(err){ logEl.innerHTML+=`<span class="log-error">❌ 오류: ${err.message}</span>`; statusEl.textContent="오류 발생"; }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+async function batchInsert(table, rows, logEl, label) {
+  let cnt=0;
+  const CHUNK=100;
+  for(let i=0;i<rows.length;i+=CHUNK){
+    const { error } = await sb.from(table).insert(rows.slice(i,i+CHUNK));
+    if(!error) cnt+=Math.min(CHUNK,rows.length-i);
+  }
+  logEl.innerHTML+=`<span class="log-ok">✅ ${label}: ${cnt}건</span><br>`;
+  return cnt;
+}
+
+async function uploadEnvData(wb,logEl,statusEl){
+  logEl.innerHTML+=`<span class="log-info">🏭 2공장 환경 DATA 업로드 시작</span><br>`;
+  let total=0;
+  if(wb.Sheets["SC145 전력,수도 사용량"]){
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets["SC145 전력,수도 사용량"],{header:1,defval:null});
+    let year=null,month=null; const data=[];
+    for(let i=1;i<rows.length;i++){
+      const r=rows[i]; if(r[0])year=parseInt(r[0]); if(r[1])month=parseInt(r[1]);
+      const ds=r[2],elec=r[3],ph=r[5],water=r[6];
+      if(!ds||!elec||!water||!year||!month)continue;
+      const day=parseInt(String(ds).replace('일',''));
+      if(isNaN(day))continue;
+      data.push({date:`${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`,elec:parseFloat(elec),ph:ph?parseFloat(ph):null,water:parseFloat(water)});
+    }
+    total+=await batchInsert("sc145",data,logEl,"SC145");
+  }
+  if(wb.Sheets["2공장 폐수처리장 운영일지"]){
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets["2공장 폐수처리장 운영일지"],{header:1,defval:null});
+    const data=[];
+    for(let i=2;i<rows.length;i++){
+      const r=rows[i]; const dv=r[0],w1=r[1],w2=r[3],disc=r[5],wtp=r[7];
+      if(!dv||!w1||!w2||!disc)continue;
+      if(typeof dv!=='number')continue;
+      const d=new Date(Math.round((dv-25569)*86400*1000));
+      data.push({date:d.toISOString().slice(0,10),water1:parseFloat(w1),water2:parseFloat(w2),discharge:parseFloat(disc),wtp:typeof wtp==='number'?wtp:null});
+    }
+    total+=await batchInsert("waste",data,logEl,"폐수처리장");
+  }
+  if(wb.Sheets["순수실 폐수발생량"]){
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets["순수실 폐수발생량"],{header:1,defval:null});
+    const data=[];
+    for(let i=2;i<rows.length;i++){
+      const r=rows[i]; const dv=r[0],drain=r[1];
+      if(!dv||typeof drain!=='number')continue;
+      if(typeof dv!=='number')continue;
+      const d=new Date(Math.round((dv-25569)*86400*1000));
+      data.push({date:d.toISOString().slice(0,10),value:drain});
+    }
+    total+=await batchInsert("pure",data,logEl,"순수실");
+  }
+  if(wb.Sheets["TOC데이터"]){
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets["TOC데이터"],{header:1,defval:null});
+    const data=[]; let i=1;
+    while(i<rows.length){
+      const r=rows[i];
+      if(r[0]&&r[1]==='원수'){
+        const ym=String(r[0]),year=parseInt(ym.split('.')[0]),month=parseInt(ym.split('.')[1]);
+        const rawV=r.slice(2,33),treatV=(i+1<rows.length&&rows[i+1][1]==='처리수')?rows[i+1].slice(2,33):Array(31).fill(null);
+        for(let d=0;d<31;d++){
+          if(rawV[d]===null||typeof rawV[d]!=='number')continue;
+          const day=d+1; if(day>new Date(year,month,0).getDate())continue;
+          data.push({date:`${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`,raw:rawV[d],treated:typeof treatV[d]==='number'?treatV[d]:null});
+        }
+        i+=2;
+      } else i++;
+    }
+    total+=await batchInsert("toc",data,logEl,"TOC");
+  }
+  statusEl.textContent=`완료! 총 ${total}건`; logEl.innerHTML+=`<span class="log-ok">🎉 완료: ${total}건</span>`;
+}
+
+async function uploadH2O2File(wb,logEl,statusEl){
+  logEl.innerHTML+=`<span class="log-info">🧪 과산화수소 검침기록부 업로드</span><br>`;
+  const monthMap={'1월':[2026,1],'2월':[2026,2],'3월':[2026,3],'4월':[2026,4],'5월':[2026,5],'6월':[2026,6],'7월':[2026,7],'8월':[2026,8],'9월':[2026,9],'10월':[2026,10],'11월':[2026,11],'12월':[2026,12]};
+  let total=0;
+  for(const sn of wb.SheetNames){
+    if(!monthMap[sn])continue;
+    const [year,month]=monthMap[sn];
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:null});
+    const data=[];
+    for(let i=4;i<rows.length;i++){
+      const r=rows[i]; const dr=r[0]; if(!dr||!String(dr).includes('/'))continue;
+      const day=parseInt(String(dr).split('/')[1]); if(isNaN(day))continue;
+      const bo=typeof r[2]==='number'?r[2]:null, ox=typeof r[5]==='number'?r[5]:null;
+      if(bo===null&&ox===null)continue;
+      data.push({factory:"2공장",date:`${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`,bo,ox});
+    }
+    total+=await batchInsert("h2o2",data,logEl,sn);
+  }
+  statusEl.textContent=`완료! ${total}건`; logEl.innerHTML+=`<span class="log-ok">🎉 완료: ${total}건</span>`;
+}
+
+async function uploadChemicalFile(wb,logEl,statusEl){
+  logEl.innerHTML+=`<span class="log-info">🧴 약품사용대장 업로드</span><br>`;
+  const colMap={'소석회':[1,2],'염화철':[4,5],'황산':[7,8],'고분자응집제':[10,11],'유화소다':[13,14],'소포제':[16,17]};
+  let total=0;
+  for(const sn of wb.SheetNames){
+    const parts=sn.split('_')[1]; if(!parts||!parts.includes('.'))continue;
+    const [yy,mm]=parts.split('.'); const year=2000+parseInt(yy),month=parseInt(mm);
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:null});
+    const data=[];
+    for(let i=2;i<rows.length;i++){
+      const r=rows[i]; const day=r[0]; if(!Number.isInteger(day)||day<1||day>31)continue;
+      const date=`${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+      const record={date};
+      let hasData=false;
+      for(const [chem,[inC,useC]] of Object.entries(colMap)){
+        const inv=typeof r[inC]==='number'?r[inC]:null, usev=typeof r[useC]==='number'?r[useC]:null;
+        record[chem+"_입고"]=inv; record[chem+"_사용"]=usev;
+        if(inv!==null||usev!==null)hasData=true;
+      }
+      if(hasData)data.push(record);
+    }
+    total+=await batchInsert("chemical",data,logEl,sn);
+  }
+  statusEl.textContent=`완료! ${total}건`; logEl.innerHTML+=`<span class="log-ok">🎉 완료: ${total}건</span>`;
+}
+
+// ── 엑셀 다운로드 ────────────────────────────────────────────
+window.downloadExcel = async function() {
+  const btn=document.getElementById("excel-btn"); btn.textContent="⏳ 다운로드 중..."; btn.disabled=true;
+  try {
+    const wb2=XLSX.utils.book_new();
+    const addSheet=(name,headers,data)=>XLSX.utils.book_append_sheet(wb2,XLSX.utils.aoa_to_sheet([headers,...data]),name);
+
+    const [sc,wa,pu,to,h1,h2,ch,ce] = await Promise.all([
+      sb.from("sc145").select("*").order("date",{ascending:true}),
+      sb.from("waste").select("*").order("date",{ascending:true}),
+      sb.from("pure").select("*").order("date",{ascending:true}),
+      sb.from("toc").select("*").order("date",{ascending:true}),
+      sb.from("h2o2").select("*").eq("factory","1공장").order("date",{ascending:true}),
+      sb.from("h2o2").select("*").eq("factory","2공장").order("date",{ascending:true}),
+      sb.from("chemical").select("*").order("date",{ascending:true}),
+      sb.from("chem").select("*").order("date",{ascending:true}),
+    ]);
+
+    const scD=sc.data||[]; addSheet("SC145 전력·수도",["날짜","전력검침","전력사용량","pH","수도검침","수도사용량"],scD.map((r,i)=>{const p=scD[i-1];return[r.date,r.elec,p?+(r.elec-p.elec).toFixed(1):"",r.ph??"",r.water,p?+(r.water-p.water).toFixed(1):""];}));
+    const waD=wa.data||[]; addSheet("폐수처리장 운영일지",["날짜","상수검침","상수사용량","공업용수검침","공업용수사용량","방류검침","방류사용량","폐수처리장시수"],waD.map((r,i)=>{const p=waD[i-1];return[r.date,r.water1,p?+(r.water1-p.water1).toFixed(1):"",r.water2,p?+(r.water2-p.water2).toFixed(1):"",r.discharge,p?+(r.discharge-p.discharge).toFixed(1):"",r.wtp??""];}));
+    const puD=pu.data||[]; addSheet("순수실 폐수발생량",["날짜","농축수검침값","순수실 폐수발생량"],puD.map((r,i)=>{const p=puD[i-1];return[r.date,r.value,p?+(r.value-p.value).toFixed(1):""];}));
+    addSheet("TOC 데이터",["날짜","원수 TOC","처리수 TOC","비고"],(to.data||[]).map(r=>[r.date,r.raw??"",r.treated??"",r.memo||""]));
+    addSheet("H2O2 검침 (1공장)",["날짜","BO제거기 검침값","옥사이드 검침값"],(h1.data||[]).map(r=>[r.date,r.bo??"",r.ox??""]));
+    addSheet("H2O2 검침 (2공장)",["날짜","BO제거기 검침값","옥사이드 검침값"],(h2.data||[]).map(r=>[r.date,r.bo??"",r.ox??""]));
+    for(const chem of ["소석회","염화철","황산","고분자응집제","유화소다"]){
+      const inK=chem+"_입고",useK=chem+"_사용";
+      const cD=(ch.data||[]).filter(r=>r[inK]!=null||r[useK]!=null);
+      let stock=INIT_STOCK[chem]??0;
+      addSheet("약품_"+chem,["날짜","입고량(Kg)","사용량(Kg)","재고량(Kg)"],cD.map(r=>{stock+=(r[inK]??0)-(r[useK]??0);return[r.date,r[inK]??"",r[useK]??"",stock];}));
+    }
+    addSheet("화학물질 관리대장",["날짜","공장","물질명","CAS No.","수량","단위","구분","비고"],(ce.data||[]).map(r=>[r.date,r.factory,r.name,r.casno||"",r.amount,r.unit,r.type,r.memo||""]));
+    XLSX.writeFile(wb2,`TLB_환경데이터_${new Date().toISOString().slice(0,10)}.xlsx`);
+  } catch(e){ alert("오류가 발생했습니다."); console.error(e); }
+  btn.textContent="📥 엑셀 다운로드"; btn.disabled=false;
+};
+
+window.addEventListener("DOMContentLoaded", () => {
+  updateFactoryUI();
+  switchTabInternal("stats");
+});
+</script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Pretendard',-apple-system,sans-serif;background:#f8fafc;color:#1e293b;min-height:100vh}
+#app-screen{display:flex;flex-direction:column;min-height:100vh}
+.header{background:#0f172a;color:white;padding:0 24px;display:flex;align-items:center;justify-content:space-between;height:60px;position:sticky;top:0;z-index:100}
+.header-left{display:flex;align-items:center;gap:16px}
+.header-badge{background:#3b82f6;color:white;font-size:10px;font-weight:800;letter-spacing:2px;padding:4px 10px;border-radius:20px}
+.header h1{font-size:15px;font-weight:600}
+.header-right{display:flex;align-items:center;gap:10px}
+.excel-btn-header{background:#22c55e;color:white;border:none;padding:7px 16px;border-radius:8px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;white-space:nowrap}
+.excel-btn-header:hover{background:#16a34a}
+.excel-btn-header:disabled{opacity:.6;cursor:not-allowed}
+.factory-bar{background:white;border-bottom:1px solid #e2e8f0;padding:0 24px;display:flex;gap:4px}
+.factory-btn{padding:14px 20px;border:none;background:transparent;font-size:14px;font-weight:500;color:#94a3b8;cursor:pointer;border-bottom:2.5px solid transparent;font-family:inherit;transition:all .2s}
+.factory-btn.active{color:#0f172a;border-bottom-color:#3b82f6;font-weight:700}
+.content{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
+.tab-bar{display:flex;gap:8px;margin-bottom:24px;flex-wrap:wrap}
+.tab-btn{padding:9px 18px;border-radius:20px;border:1.5px solid #e2e8f0;background:white;color:#64748b;font-size:13px;font-weight:500;cursor:pointer;font-family:inherit;transition:all .2s}
+.tab-btn.active{background:#0f172a;color:white;border-color:#0f172a}
+.tab-panel{display:none}
+.month-bar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+.month-btn{padding:6px 14px;border-radius:16px;border:1.5px solid #e2e8f0;background:white;color:#64748b;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;transition:all .2s}
+.month-btn.active{background:#3b82f6;color:white;border-color:#3b82f6;font-weight:700}
+.month-btn:hover:not(.active){background:#f1f5f9}
+.chem-sub-bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}
+.chem-sub-btn{padding:8px 18px;border-radius:20px;border:1.5px solid #e2e8f0;background:white;color:#64748b;font-size:13px;font-weight:500;cursor:pointer;font-family:inherit;transition:all .2s}
+.chem-sub-btn.active{background:#3b82f6;color:white;border-color:#3b82f6;font-weight:700}
+.chem-sub-btn:hover:not(.active){background:#f1f5f9}
+.input-card{background:white;border-radius:16px;padding:24px;margin-bottom:20px;border:1px solid #e2e8f0}
+.input-card h3{font-size:14px;font-weight:700;color:#0f172a;margin-bottom:16px}
+.input-row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+.input-group{display:flex;flex-direction:column;gap:6px;flex:1;min-width:120px}
+.input-group label{font-size:11px;font-weight:600;color:#64748b}
+.input-group input,.input-group select{padding:10px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:13px;font-family:inherit;outline:none;transition:border-color .2s;background:white}
+.input-group input:focus,.input-group select:focus{border-color:#3b82f6}
+.add-btn{padding:10px 22px;background:#3b82f6;color:white;border:none;border-radius:8px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;height:40px;white-space:nowrap}
+.add-btn:hover{background:#2563eb}
+.table-card{background:white;border-radius:16px;border:1px solid #e2e8f0;overflow:hidden;overflow-x:auto}
+.table-header{padding:18px 24px;border-bottom:1px solid #f1f5f9}
+.table-header h3{font-size:14px;font-weight:700;color:#0f172a}
+table{width:100%;border-collapse:collapse;min-width:500px}
+thead th{background:#f8fafc;padding:11px 14px;text-align:left;font-size:11px;font-weight:700;color:#64748b;border-bottom:1px solid #e2e8f0;white-space:nowrap}
+tbody td{padding:11px 14px;font-size:13px;color:#334155;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover td{background:#f8fafc}
+.loading-cell,.empty-cell{text-align:center;color:#94a3b8;font-size:13px;padding:32px !important}
+.del-btn{padding:4px 10px;background:#fef2f2;color:#ef4444;border:1px solid #fecaca;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit}
+.del-btn:hover{background:#ef4444;color:white}
+.usage-tag{font-size:11px;color:#94a3b8}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px}
+.stat-card{background:white;border-radius:16px;padding:20px;border:1px solid #e2e8f0}
+.stat-label{font-size:11px;font-weight:700;color:#94a3b8;margin-bottom:6px}
+.stat-value{font-size:20px;font-weight:700;color:#0f172a;line-height:1.3}
+.stat-sub{font-size:11px;color:#94a3b8;margin-top:4px}
+.stats-section-title{font-size:13px;font-weight:700;color:#64748b;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #e2e8f0}
+.chart-card{background:white;border-radius:16px;padding:24px;border:1px solid #e2e8f0;margin-bottom:16px}
+.chart-card h3{font-size:13px;font-weight:700;color:#0f172a;margin-bottom:16px}
+.notice-banner{background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:12px 16px;font-size:12px;color:#1d4ed8;margin-bottom:16px}
+.upload-card{background:white;border-radius:16px;padding:24px;border:1px solid #e2e8f0;margin-bottom:20px}
+.upload-card h3{font-size:14px;font-weight:700;color:#0f172a;margin-bottom:8px}
+.upload-card p{font-size:12px;color:#64748b;margin-bottom:16px}
+.drop-zone{border:2px dashed #cbd5e1;border-radius:12px;padding:40px 24px;text-align:center;cursor:pointer;transition:all .2s;background:#f8fafc}
+.drop-zone.drag-over{border-color:#3b82f6;background:#eff6ff}
+.drop-zone .drop-icon{font-size:36px;margin-bottom:12px}
+.drop-zone p{font-size:13px;color:#64748b;margin-bottom:8px}
+.browse-btn{display:inline-block;padding:8px 18px;background:#3b82f6;color:white;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;margin-top:8px}
+.upload-status{margin-top:16px;font-size:13px;font-weight:600;color:#0f172a;min-height:20px}
+.upload-log{margin-top:12px;background:#f1f5f9;border-radius:8px;padding:14px;font-size:12px;font-family:monospace;max-height:200px;overflow-y:auto}
+.log-ok{color:#22c55e}.log-error{color:#ef4444}.log-info{color:#3b82f6}
+@media(max-width:768px){
+  .content{padding:12px}
+  .header{height:50px;padding:0 14px}
+  .header h1{font-size:13px}
+  .header-badge{display:none}
+  .excel-btn-header{font-size:11px;padding:5px 10px}
+  .factory-bar{padding:0 12px;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .factory-btn{padding:10px 14px;font-size:13px}
+  .tab-bar{gap:6px;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;scrollbar-width:none;margin-bottom:16px}
+  .tab-bar::-webkit-scrollbar{display:none}
+  .tab-btn{padding:7px 13px;font-size:12px;white-space:nowrap;flex-shrink:0}
+  .month-bar{gap:5px;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding-bottom:4px}
+  .month-bar::-webkit-scrollbar{display:none}
+  .month-btn{padding:5px 11px;font-size:11px;white-space:nowrap;flex-shrink:0}
+  .chem-sub-bar{gap:5px;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .chem-sub-bar::-webkit-scrollbar{display:none}
+  .chem-sub-btn{padding:6px 13px;font-size:12px;white-space:nowrap;flex-shrink:0}
+  .input-card{padding:16px}
+  .input-card h3{font-size:13px}
+  .input-row{flex-direction:column;gap:10px}
+  .input-group{min-width:100%}
+  .input-group input,.input-group select{padding:10px 12px;font-size:14px}
+  .add-btn{width:100%;height:44px;font-size:14px}
+  .table-header{padding:14px 16px}
+  .table-header h3{font-size:13px}
+  thead th{padding:9px 10px;font-size:10px}
+  tbody td{padding:9px 10px;font-size:12px}
+  .stats-grid{grid-template-columns:1fr 1fr;gap:10px}
+  .stat-card{padding:14px}
+  .stat-value{font-size:16px}
+  .stat-label{font-size:10px}
+  .chart-card{padding:16px}
+  .chart-card h3{font-size:12px;margin-bottom:12px}
+  .stats-section-title{font-size:12px}
+  .notice-banner{font-size:11px;padding:10px 12px}
+}
+</style>
+</head>
+<body>
+<div id="app-screen">
+  <div class="header">
+    <div class="header-left"><span class="header-badge">TLB</span><h1>환경팀 검침 시스템</h1></div>
+    <div class="header-right">
+      <button class="excel-btn-header" id="excel-btn" onclick="downloadExcel()">📥 엑셀 다운로드</button>
+    </div>
+  </div>
+
+  <div class="factory-bar">
+    <button class="factory-btn" data-factory="1공장" onclick="switchFactory('1공장')">🏭 1공장</button>
+    <button class="factory-btn active" data-factory="2공장" onclick="switchFactory('2공장')">🏭 2공장</button>
+  </div>
+
+  <div class="content">
+    <div class="tab-bar">
+      <button class="tab-btn active" data-tab="stats" onclick="switchTab('stats')">📊 통계</button>
+      <button class="tab-btn only-2factory" data-tab="sc145" onclick="switchTab('sc145')">⚡ SC145 전력·수도</button>
+      <button class="tab-btn only-2factory" data-tab="waste" onclick="switchTab('waste')">📋 폐수처리장 운영일지</button>
+      <button class="tab-btn only-2factory" data-tab="pure" onclick="switchTab('pure')">💧 순수실 폐수발생량</button>
+      <button class="tab-btn only-2factory" data-tab="toc" onclick="switchTab('toc')">🔬 TOC 데이터</button>
+      <button class="tab-btn only-2factory" data-tab="chemical" onclick="switchTab('chemical')">🧴 약품사용대장</button>
+      <button class="tab-btn" data-tab="h2o2" onclick="switchTab('h2o2')">🧪 H2O2 검침</button>
+      <button class="tab-btn" data-tab="chem" onclick="switchTab('chem')">📦 화학물질 관리대장</button>
+      <button class="tab-btn" data-tab="upload" onclick="switchTab('upload')">📤 파일 업로드</button>
+    </div>
+
+    <!-- 통계 -->
+    <div id="panel-stats" class="tab-panel" style="display:block">
+      <div class="month-bar">
+        <button class="month-btn active" data-month="전체" onclick="switchMonth('전체')">전체</button>
+        <button class="month-btn" data-month="1" onclick="switchMonth('1')">1월</button>
+        <button class="month-btn" data-month="2" onclick="switchMonth('2')">2월</button>
+        <button class="month-btn" data-month="3" onclick="switchMonth('3')">3월</button>
+        <button class="month-btn" data-month="4" onclick="switchMonth('4')">4월</button>
+        <button class="month-btn" data-month="5" onclick="switchMonth('5')">5월</button>
+        <button class="month-btn" data-month="6" onclick="switchMonth('6')">6월</button>
+        <button class="month-btn" data-month="7" onclick="switchMonth('7')">7월</button>
+        <button class="month-btn" data-month="8" onclick="switchMonth('8')">8월</button>
+        <button class="month-btn" data-month="9" onclick="switchMonth('9')">9월</button>
+        <button class="month-btn" data-month="10" onclick="switchMonth('10')">10월</button>
+        <button class="month-btn" data-month="11" onclick="switchMonth('11')">11월</button>
+        <button class="month-btn" data-month="12" onclick="switchMonth('12')">12월</button>
+      </div>
+      <div class="stats-section-title only-2factory">⚡ 2공장 SC145 현황</div>
+      <div class="stats-grid only-2factory">
+        <div class="stat-card"><div class="stat-label">전력 최근 사용량</div><div class="stat-value" id="stat-elec2">-</div><div class="stat-sub">직전 검침 대비</div></div>
+        <div class="stat-card"><div class="stat-label">수도 최근 사용량</div><div class="stat-value" id="stat-water2">-</div><div class="stat-sub">직전 검침 대비</div></div>
+      </div>
+      <div class="stats-section-title">🧪 H2O2 현황</div>
+      <div class="stats-grid">
+        <div class="stat-card only-1factory"><div class="stat-label">1공장 최근 사용량</div><div class="stat-value" id="stat-h2o2-1f" style="font-size:15px">-</div><div class="stat-sub">직전 검침 대비</div></div>
+        <div class="stat-card only-2factory"><div class="stat-label">2공장 최근 사용량</div><div class="stat-value" id="stat-h2o2-2f" style="font-size:15px">-</div><div class="stat-sub">직전 검침 대비</div></div>
+      </div>
+      <div class="chart-card only-2factory"><h3>⚡ 전력 사용량 추이 (SC145)</h3><canvas id="chart-elec" height="80"></canvas></div>
+      <div class="chart-card only-2factory"><h3>💧 수도 사용량 추이 (SC145)</h3><canvas id="chart-water" height="80"></canvas></div>
+      <div class="chart-card only-1factory"><h3>🧪 H2O2 사용량 추이 · 1공장</h3><canvas id="chart-h2o2-1f" height="80"></canvas></div>
+      <div class="chart-card only-2factory"><h3>🧪 H2O2 사용량 추이 · 2공장</h3><canvas id="chart-h2o2-2f" height="80"></canvas></div>
+      <div class="chart-card only-2factory"><h3>🔬 TOC 추이 (원수 / 처리수 / 배출허용기준 75)</h3><canvas id="chart-toc" height="80"></canvas></div>
+      <div class="chart-card only-2factory"><h3>🧴 소석회 사용량 / 재고량 추이</h3><canvas id="chart-chemical" height="80"></canvas></div>
+    </div>
+
+    <!-- SC145 -->
+    <div id="panel-sc145" class="tab-panel">
+      <div class="month-bar"><button class="month-btn active" data-month="전체" onclick="switchMonth('전체')">전체</button><button class="month-btn" data-month="1" onclick="switchMonth('1')">1월</button><button class="month-btn" data-month="2" onclick="switchMonth('2')">2월</button><button class="month-btn" data-month="3" onclick="switchMonth('3')">3월</button><button class="month-btn" data-month="4" onclick="switchMonth('4')">4월</button><button class="month-btn" data-month="5" onclick="switchMonth('5')">5월</button><button class="month-btn" data-month="6" onclick="switchMonth('6')">6월</button><button class="month-btn" data-month="7" onclick="switchMonth('7')">7월</button><button class="month-btn" data-month="8" onclick="switchMonth('8')">8월</button><button class="month-btn" data-month="9" onclick="switchMonth('9')">9월</button><button class="month-btn" data-month="10" onclick="switchMonth('10')">10월</button><button class="month-btn" data-month="11" onclick="switchMonth('11')">11월</button><button class="month-btn" data-month="12" onclick="switchMonth('12')">12월</button></div>
+      <div class="notice-banner">⚡ 2공장 SC145 스크러버 전력 및 수도 검침</div>
+      <div class="input-card"><h3>➕ 검침 입력</h3>
+        <div class="input-row">
+          <div class="input-group"><label>검침일</label><input type="date" id="sc145-date"></div>
+          <div class="input-group"><label>전력 검침값 (kWh)</label><input type="number" id="sc145-elec" placeholder="예: 8620.3" step="0.1"></div>
+          <div class="input-group"><label>pH</label><input type="number" id="sc145-ph" placeholder="예: 7.6" step="0.1"></div>
+          <div class="input-group"><label>수도 검침값</label><input type="number" id="sc145-water" placeholder="예: 27713"></div>
+          <button class="add-btn" onclick="addSC145()">저장</button>
+        </div>
+      </div>
+      <div class="table-card"><div class="table-header"><h3>SC145 전력·수도 기록</h3></div>
+        <table><thead><tr><th>날짜</th><th>전력 검침값(kWh)</th><th>전력 사용량</th><th>pH</th><th>수도 검침값</th><th>수도 사용량</th><th>삭제</th></tr></thead>
+        <tbody id="sc145-tbody"></tbody></table>
+      </div>
+    </div>
+
+    <!-- 폐수처리장 -->
+    <div id="panel-waste" class="tab-panel">
+      <div class="month-bar"><button class="month-btn active" data-month="전체" onclick="switchMonth('전체')">전체</button><button class="month-btn" data-month="1" onclick="switchMonth('1')">1월</button><button class="month-btn" data-month="2" onclick="switchMonth('2')">2월</button><button class="month-btn" data-month="3" onclick="switchMonth('3')">3월</button><button class="month-btn" data-month="4" onclick="switchMonth('4')">4월</button><button class="month-btn" data-month="5" onclick="switchMonth('5')">5월</button><button class="month-btn" data-month="6" onclick="switchMonth('6')">6월</button><button class="month-btn" data-month="7" onclick="switchMonth('7')">7월</button><button class="month-btn" data-month="8" onclick="switchMonth('8')">8월</button><button class="month-btn" data-month="9" onclick="switchMonth('9')">9월</button><button class="month-btn" data-month="10" onclick="switchMonth('10')">10월</button><button class="month-btn" data-month="11" onclick="switchMonth('11')">11월</button><button class="month-btn" data-month="12" onclick="switchMonth('12')">12월</button></div>
+      <div class="notice-banner">📋 2공장 폐수처리장 운영일지</div>
+      <div class="input-card"><h3>➕ 검침 입력</h3>
+        <div class="input-row">
+          <div class="input-group"><label>날짜</label><input type="date" id="waste-date"></div>
+          <div class="input-group"><label>상수 검침값</label><input type="number" id="waste-water1"></div>
+          <div class="input-group"><label>공업용수 검침값</label><input type="number" id="waste-water2"></div>
+          <div class="input-group"><label>방류 검침값</label><input type="number" id="waste-discharge"></div>
+          <div class="input-group"><label>폐수처리장 시수</label><input type="number" id="waste-wtp"></div>
+          <div class="input-group"><label>비고</label><input type="text" id="waste-memo"></div>
+          <button class="add-btn" onclick="addWaste()">저장</button>
+        </div>
+      </div>
+      <div class="table-card"><div class="table-header"><h3>폐수처리장 운영일지</h3></div>
+        <table><thead><tr><th>날짜</th><th>상수</th><th>공업용수</th><th>방류</th><th>폐수처리장 시수</th><th>비고</th><th>삭제</th></tr></thead>
+        <tbody id="waste-tbody"></tbody></table>
+      </div>
+    </div>
+
+    <!-- 순수실 -->
+    <div id="panel-pure" class="tab-panel">
+      <div class="month-bar"><button class="month-btn active" data-month="전체" onclick="switchMonth('전체')">전체</button><button class="month-btn" data-month="1" onclick="switchMonth('1')">1월</button><button class="month-btn" data-month="2" onclick="switchMonth('2')">2월</button><button class="month-btn" data-month="3" onclick="switchMonth('3')">3월</button><button class="month-btn" data-month="4" onclick="switchMonth('4')">4월</button><button class="month-btn" data-month="5" onclick="switchMonth('5')">5월</button><button class="month-btn" data-month="6" onclick="switchMonth('6')">6월</button><button class="month-btn" data-month="7" onclick="switchMonth('7')">7월</button><button class="month-btn" data-month="8" onclick="switchMonth('8')">8월</button><button class="month-btn" data-month="9" onclick="switchMonth('9')">9월</button><button class="month-btn" data-month="10" onclick="switchMonth('10')">10월</button><button class="month-btn" data-month="11" onclick="switchMonth('11')">11월</button><button class="month-btn" data-month="12" onclick="switchMonth('12')">12월</button></div>
+      <div class="notice-banner">💧 농축수 드레인 (순수탱크 뒤) 검침값 입력</div>
+      <div class="input-card"><h3>➕ 검침 입력</h3>
+        <div class="input-row">
+          <div class="input-group"><label>날짜</label><input type="date" id="pure-date"></div>
+          <div class="input-group"><label>농축수 검침값</label><input type="number" id="pure-value"></div>
+          <button class="add-btn" onclick="addPure()">저장</button>
+        </div>
+      </div>
+      <div class="table-card"><div class="table-header"><h3>순수실 폐수발생량</h3></div>
+        <table><thead><tr><th>날짜</th><th>농축수 검침값</th><th>순수실 폐수발생량</th><th>삭제</th></tr></thead>
+        <tbody id="pure-tbody"></tbody></table>
+      </div>
+    </div>
+
+    <!-- TOC -->
+    <div id="panel-toc" class="tab-panel">
+      <div class="month-bar"><button class="month-btn active" data-month="전체" onclick="switchMonth('전체')">전체</button><button class="month-btn" data-month="1" onclick="switchMonth('1')">1월</button><button class="month-btn" data-month="2" onclick="switchMonth('2')">2월</button><button class="month-btn" data-month="3" onclick="switchMonth('3')">3월</button><button class="month-btn" data-month="4" onclick="switchMonth('4')">4월</button><button class="month-btn" data-month="5" onclick="switchMonth('5')">5월</button><button class="month-btn" data-month="6" onclick="switchMonth('6')">6월</button><button class="month-btn" data-month="7" onclick="switchMonth('7')">7월</button><button class="month-btn" data-month="8" onclick="switchMonth('8')">8월</button><button class="month-btn" data-month="9" onclick="switchMonth('9')">9월</button><button class="month-btn" data-month="10" onclick="switchMonth('10')">10월</button><button class="month-btn" data-month="11" onclick="switchMonth('11')">11월</button><button class="month-btn" data-month="12" onclick="switchMonth('12')">12월</button></div>
+      <div class="notice-banner">🔬 TOC 데이터 입력 (원수 / 처리수)</div>
+      <div class="input-card"><h3>➕ TOC 입력</h3>
+        <div class="input-row">
+          <div class="input-group"><label>날짜</label><input type="date" id="toc-date"></div>
+          <div class="input-group"><label>원수 TOC</label><input type="number" id="toc-raw" step="0.01"></div>
+          <div class="input-group"><label>처리수 TOC</label><input type="number" id="toc-treated" step="0.01"></div>
+          <div class="input-group"><label>비고</label><input type="text" id="toc-memo"></div>
+          <button class="add-btn" onclick="addTOC()">저장</button>
+        </div>
+      </div>
+      <div class="table-card"><div class="table-header"><h3>TOC 데이터</h3></div>
+        <table><thead><tr><th>날짜</th><th>원수 TOC</th><th>처리수 TOC</th><th>비고</th><th>삭제</th></tr></thead>
+        <tbody id="toc-tbody"></tbody></table>
+      </div>
+    </div>
+
+    <!-- 약품사용대장 -->
+    <div id="panel-chemical" class="tab-panel">
+      <div class="month-bar"><button class="month-btn active" data-month="전체" onclick="switchMonth('전체')">전체</button><button class="month-btn" data-month="1" onclick="switchMonth('1')">1월</button><button class="month-btn" data-month="2" onclick="switchMonth('2')">2월</button><button class="month-btn" data-month="3" onclick="switchMonth('3')">3월</button><button class="month-btn" data-month="4" onclick="switchMonth('4')">4월</button><button class="month-btn" data-month="5" onclick="switchMonth('5')">5월</button><button class="month-btn" data-month="6" onclick="switchMonth('6')">6월</button><button class="month-btn" data-month="7" onclick="switchMonth('7')">7월</button><button class="month-btn" data-month="8" onclick="switchMonth('8')">8월</button><button class="month-btn" data-month="9" onclick="switchMonth('9')">9월</button><button class="month-btn" data-month="10" onclick="switchMonth('10')">10월</button><button class="month-btn" data-month="11" onclick="switchMonth('11')">11월</button><button class="month-btn" data-month="12" onclick="switchMonth('12')">12월</button></div>
+      <div class="notice-banner">🧴 2공장 폐수처리장 약품사용대장 · 약품을 선택하세요</div>
+      <div class="chem-sub-bar">
+        <button class="chem-sub-btn active" data-chem="소석회" onclick="switchChem('소석회')">소석회</button>
+        <button class="chem-sub-btn" data-chem="염화철" onclick="switchChem('염화철')">염화철</button>
+        <button class="chem-sub-btn" data-chem="황산" onclick="switchChem('황산')">황산</button>
+        <button class="chem-sub-btn" data-chem="고분자응집제" onclick="switchChem('고분자응집제')">고분자응집제</button>
+        <button class="chem-sub-btn" data-chem="유화소다" onclick="switchChem('유화소다')">유화소다</button>
+      </div>
+      <div class="input-card">
+        <h3 id="chemical-input-title">➕ 소석회 입력</h3>
+        <div class="input-row">
+          <div class="input-group"><label>날짜</label><input type="date" id="chemical-date"></div>
+          <div class="input-group"><label>입고량 (Kg)</label><input type="number" id="chemical-in"></div>
+          <div class="input-group"><label>사용량 (Kg)</label><input type="number" id="chemical-use"></div>
+          <button class="add-btn" onclick="addChemicalSingle()">저장</button>
+        </div>
+      </div>
+      <div class="table-card"><div class="table-header"><h3 id="chemical-table-title">소석회 사용 내역</h3></div>
+        <table><thead><tr><th>날짜</th><th>입고량 (Kg)</th><th>사용량 (Kg)</th><th>재고량 (Kg)</th><th>삭제</th></tr></thead>
+        <tbody id="chemical-tbody"></tbody></table>
+      </div>
+    </div>
+
+    <!-- H2O2 -->
+    <div id="panel-h2o2" class="tab-panel">
+      <div class="month-bar"><button class="month-btn active" data-month="전체" onclick="switchMonth('전체')">전체</button><button class="month-btn" data-month="1" onclick="switchMonth('1')">1월</button><button class="month-btn" data-month="2" onclick="switchMonth('2')">2월</button><button class="month-btn" data-month="3" onclick="switchMonth('3')">3월</button><button class="month-btn" data-month="4" onclick="switchMonth('4')">4월</button><button class="month-btn" data-month="5" onclick="switchMonth('5')">5월</button><button class="month-btn" data-month="6" onclick="switchMonth('6')">6월</button><button class="month-btn" data-month="7" onclick="switchMonth('7')">7월</button><button class="month-btn" data-month="8" onclick="switchMonth('8')">8월</button><button class="month-btn" data-month="9" onclick="switchMonth('9')">9월</button><button class="month-btn" data-month="10" onclick="switchMonth('10')">10월</button><button class="month-btn" data-month="11" onclick="switchMonth('11')">11월</button><button class="month-btn" data-month="12" onclick="switchMonth('12')">12월</button></div>
+      <div class="input-card"><h3>➕ 검침 입력</h3>
+        <div class="input-row">
+          <div class="input-group"><label>검침일</label><input type="date" id="h2o2-date"></div>
+          <div class="input-group"><label>BO제거기 (m³)</label><input type="number" id="h2o2-bo" step="0.01"></div>
+          <div class="input-group"><label>옥사이드 (m³)</label><input type="number" id="h2o2-ox" step="0.01"></div>
+          <button class="add-btn" onclick="addH2O2()">저장</button>
+        </div>
+      </div>
+      <div class="table-card"><div class="table-header"><h3>H2O2 검침 기록</h3></div>
+        <table><thead><tr><th>검침일</th><th>BO제거기 검침값</th><th>BO제거기 사용량</th><th>옥사이드 검침값</th><th>옥사이드 사용량</th><th>삭제</th></tr></thead>
+        <tbody id="h2o2-tbody"></tbody></table>
+      </div>
+    </div>
+
+    <!-- 화학물질 관리대장 -->
+    <div id="panel-chem" class="tab-panel">
+      <div class="month-bar"><button class="month-btn active" data-month="전체" onclick="switchMonth('전체')">전체</button><button class="month-btn" data-month="1" onclick="switchMonth('1')">1월</button><button class="month-btn" data-month="2" onclick="switchMonth('2')">2월</button><button class="month-btn" data-month="3" onclick="switchMonth('3')">3월</button><button class="month-btn" data-month="4" onclick="switchMonth('4')">4월</button><button class="month-btn" data-month="5" onclick="switchMonth('5')">5월</button><button class="month-btn" data-month="6" onclick="switchMonth('6')">6월</button><button class="month-btn" data-month="7" onclick="switchMonth('7')">7월</button><button class="month-btn" data-month="8" onclick="switchMonth('8')">8월</button><button class="month-btn" data-month="9" onclick="switchMonth('9')">9월</button><button class="month-btn" data-month="10" onclick="switchMonth('10')">10월</button><button class="month-btn" data-month="11" onclick="switchMonth('11')">11월</button><button class="month-btn" data-month="12" onclick="switchMonth('12')">12월</button></div>
+      <div class="input-card"><h3>➕ 화학물질 입력</h3>
+        <div class="input-row">
+          <div class="input-group"><label>날짜</label><input type="date" id="chem-date"></div>
+          <div class="input-group"><label>물질명</label><input type="text" id="chem-name"></div>
+          <div class="input-group"><label>CAS No.</label><input type="text" id="chem-casno"></div>
+          <div class="input-group" style="min-width:80px;flex:0 0 80px"><label>수량</label><input type="number" id="chem-amount"></div>
+          <div class="input-group" style="min-width:80px;flex:0 0 80px"><label>단위</label><select id="chem-unit"><option>L</option><option>kg</option><option>통</option><option>개</option></select></div>
+          <div class="input-group" style="min-width:100px;flex:0 0 100px"><label>구분</label><select id="chem-type"><option>입고</option><option>출고</option><option>사용</option></select></div>
+          <div class="input-group"><label>비고</label><input type="text" id="chem-memo"></div>
+          <button class="add-btn" onclick="addChem()">저장</button>
+        </div>
+      </div>
+      <div class="table-card"><div class="table-header"><h3>화학물질 관리대장</h3></div>
+        <table><thead><tr><th>날짜</th><th>물질명</th><th>CAS No.</th><th>수량</th><th>구분</th><th>비고</th><th>삭제</th></tr></thead>
+        <tbody id="chem-tbody"></tbody></table>
+      </div>
+    </div>
+
+    <!-- 파일 업로드 -->
+    <div id="panel-upload" class="tab-panel">
+      <div class="upload-card">
+        <h3>📤 엑셀 파일 업로드</h3>
+        <p>파일을 드래그하거나 선택하면 종류를 자동 감지해서 Supabase에 업로드합니다.</p>
+        <div class="drop-zone" id="drop-zone" ondrop="handleFileDrop(event)" ondragover="handleFileDrag(event)" ondragleave="handleFileDragLeave()">
+          <div class="drop-icon">📂</div>
+          <p>여기에 엑셀 파일을 드래그하세요</p>
+          <p style="font-size:11px;color:#94a3b8">지원: 2공장 환경 DATA / 과산화수소 검침기록부 / 약품사용대장</p>
+          <label class="browse-btn">파일 선택하기<input type="file" accept=".xlsx" style="display:none" onchange="handleFileSelect(event)"></label>
+        </div>
+        <div class="upload-status" id="upload-status"></div>
+        <div class="upload-log" id="upload-log"></div>
+      </div>
+      <div class="notice-banner">⚠️ 같은 파일을 두 번 업로드하면 데이터가 중복됩니다. 한 번만 업로드해주세요.</div>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>
